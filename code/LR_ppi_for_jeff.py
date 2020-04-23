@@ -1,4 +1,5 @@
 
+import os
 import pandas as pd
 import sys
 import numpy as np
@@ -16,18 +17,20 @@ from interpret.glassbox import ExplainableBoostingClassifier
 #from interpret.perf import ROC
 
 seed=0
+#np.random.seed(0)
 
 def do_logreg_paramtuning(X_train, y_train, class_wt):
     reslist = []
     metric_idx=1  # index where AUC is stored
     for cval in [1e-5, 1e-4, 1e-3, 1e-2, 0.1, 1, 10, 100, 1000, 10**5]:
+    #for cval in [0.1]:
         logreg = LogisticRegression(random_state=0, penalty='l2', C=cval, max_iter=10000, solver='lbfgs')   # class_weight={0:(1-class_wt+0.1), 1:1}
         cv_results = cross_validate(logreg, X_train, y_train, cv=5, scoring='average_precision')
         reslist.append((cval, np.mean(cv_results['test_score'])))
     print(*reslist, sep='\n')
     reslist = np.asarray(reslist)
     bestid = np.where(reslist[:,metric_idx]==max(reslist[:,metric_idx]))[0][0]
-    clf = LogisticRegression(random_state=0, penalty='l2', C=reslist[bestid,metric_idx], max_iter=10000, solver='lbfgs')    
+    clf = LogisticRegression(random_state=seed, penalty='l2', C=reslist[bestid,metric_idx], max_iter=10000, solver='lbfgs')    
     clf.fit(X_train, y_train)
     return clf
 
@@ -57,20 +60,6 @@ def save_model(ebm, model_file):
     pickle.dump(ebm,model_pkl)
     model_pkl.close()
 
-def tune_ebm(X_train, y_train):
-    reslist = []
-    metric_idx=1  # index where AUC is stored
-    for interac in [50, 100, 500]: 
-        clf = ExplainableBoostingClassifier(random_state=seed, interactions=interac)
-        cv_results = cross_validate(clf, X_train, y_train, cv=3, scoring='average_precision')
-        reslist.append((interac, np.mean(cv_results['test_score'])))
-    print(*reslist, sep='\n')
-    reslist = np.asarray(reslist)
-    bestid = np.where(reslist[:,metric_idx]==max(reslist[:,metric_idx]))[0][0]
-    clf = ExplainableBoostingClassifier(random_state=seed, interactions=reslist[bestid,0])
-    clf = clf.fit(X_train, y_train)
-    return clf
-
 
 if __name__ == "__main__":
    
@@ -88,34 +77,57 @@ if __name__ == "__main__":
  
     # read human proteins to select as positives
     krogan_ppis = pd.read_csv(ppis_file, header=0, index_col=0)
-    print(krogan_ppis.head())
+    #print(krogan_ppis.head())
     with open(pos_hprots_file, 'r') as hpin:
         hprots_jeff = [line.strip() for line in hpin]
-    print(hprots_jeff)
-    print(krogan_ppis.shape)
-    print(len(hprots_jeff))
+    #print(hprots_jeff)
+    #print(krogan_ppis.shape)
+    #print(len(hprots_jeff))
     pick_idx = np.concatenate([np.where(krogan_ppis.iloc[:,1]==hprots_jeff[i])[0] for i in range(len(hprots_jeff))])
-    print(pick_idx)
+    #print(pick_idx)
 
     # read negative protein pairs
     neg_pps = pd.read_csv(neg_pps_file, header=0, index_col=0)
 
     # reading features
     print('Reading pos file... ')
-    X_pos = pd.read_csv(pos_feats_file, compression='gzip', header=0)
+    X_pos = pd.read_csv(pos_feats_file, header=0)
     npos = X_pos.shape[0]
     X_train_pos = X_pos.iloc[pick_idx, :]
     X_test_pos = X_pos.drop(pick_idx)
     print('Reading neg file... ')
-    #X_neg = pd.read_csv(neg_feats_file, compression='gzip', header=0)
-    X_neg_all = pd.read_csv(neg_feats_file, header=0)
+    # since this file is large, store it as a pickle file
+    file_start = neg_feats_file.split('.')[0]
+    neg_feats_pickle_file = file_start + '.pkl'
+    if not os.path.isfile(neg_feats_pickle_file):
+        print("Reading neg features file %s" % (neg_feats_file))
+        X_neg_all = pd.read_csv(neg_feats_file, header=0)
+        # don't drop the rows since that will throw off the indexes
+        #X_neg_all.dropna(inplace=True) 
+        # just replace them with 0s
+        X_neg_all.fillna(0, inplace=True)  
+        print("\twriting %s" % (neg_feats_pickle_file))
+        X_neg_all.to_pickle(neg_feats_pickle_file)
+    else:
+        print("Reading neg features file %s" % (neg_feats_pickle_file))
+        X_neg_all = pd.read_pickle(neg_feats_pickle_file)
+    #X_neg_all = pd.read_csv(neg_feats_file, header=0)
     nneg = X_neg_all.shape[0]
     feat_names=X_pos.columns
+    #nneg = neg_pps.shape[0]
     # sample random negatives
+    np.random.seed(0)
     samp = np.random.randint(0,nneg,int(npos*negfrac))
+    print(nneg, int(npos*negfrac), samp)
+    #sys.exit()
+    #with open("data/test_neg_edges_file2.txt", 'w') as out:
+    #    out.write("\n".join([str(s) for s in samp]))
+    #neg_rows = neg_pps.iloc[samp, :]
+    #neg_rows.to_csv("data/test_neg_edges_file.txt", sep='\t')
+    #sys.exit()
     X_neg = X_neg_all.iloc[samp, :]
     nneg = X_neg.shape[0]
-    del X_neg_all
+    #del X_neg_all
 
     # generate train/test splits
     X_train_neg, X_test_neg = train_test_split(X_neg, test_size=0.2)
@@ -131,24 +143,47 @@ if __name__ == "__main__":
     print("y-test size: ",y_test.shape[0],'x',y_test.shape[1])
 
     # train and test, performance output    
-    #clf = tune_ebm(X_train, y_train)
+    print("parameter tuning")
     clf = do_logreg_paramtuning(X_train, y_train, 0)
     print("Finished training ...")
-    curr_perf = []
+    curr_perf = {}
     y_pred = clf.predict(X_test)
-    curr_perf += [metrics.accuracy_score(y_test, y_pred)]
+    curr_perf['accuracy_score'] = metrics.accuracy_score(y_test, y_pred)
     print(metrics.confusion_matrix(y_test, y_pred))
     y_pred = clf.predict_proba(X_test)
-    curr_perf += [get_aucpr(y_test, y_pred[:,1])]
-    curr_perf += [get_auc(y_test, y_pred[:,1])]
-    print("Performance: ",curr_perf)
+    curr_perf['auprc'] = get_aucpr(y_test, y_pred[:,1])
+    curr_perf['auroc'] = get_auc(y_test, y_pred[:,1])
+    print("PPI Performance: ",curr_perf)
 
     # predict on larger set, output predictions
     print("Predicting on all test pairs now... ")
-    X_neg_all = pd.read_csv(neg_feats_file, header=0)
+    #X_neg_all = pd.read_csv(neg_feats_file, header=0)
+    # don't drop the rows since that will throw off the indexes
+    #X_neg_all.dropna(inplace=True) 
+    # just replace them with 0s
+    X_neg_all.fillna(0, inplace=True) 
     scores = (clf.predict_proba(X_neg_all))[:,1]
     neg_pps['score'] = scores   
     neg_pps.to_csv(outfile)
+    prot_pred_scores = neg_pps.groupby('V2')['score'].max() 
+    prot_pred_scores.to_csv(outfile.replace('.csv','-node.csv'))
+
+    # now check the performance metrics on the nodes
+    krogan_nodes = list(krogan_ppis['V2'].values)
+    test_pos = set(krogan_nodes) - set(hprots_jeff)
+    non_pos_nodes = set(prot_pred_scores.index) - set(krogan_nodes)
+    print("%s nodes, %s non_pos_nodes: %s" % (len(prot_pred_scores.index), len(non_pos_nodes), str(list(non_pos_nodes)[:10])))
+    samp = np.random.choice(np.asarray(list(non_pos_nodes)),int(npos*negfrac*.2))
+    print("%d test pos, %d test neg" % (len(test_pos), len(samp)))
+    y_pred = np.append(prot_pred_scores[test_pos].values, prot_pred_scores[samp].values )
+    #print(y_pred)
+    #print(len(y_pred))
+    y_test = np.zeros(len(y_pred))
+    y_test[range(len(test_pos))]=1
+    curr_perf = {}
+    curr_perf['auprc'] = get_aucpr(y_test, y_pred)
+    curr_perf['auroc'] = get_auc(y_test, y_pred)
+    print("Node performance: ",curr_perf)
     
     # save model
     #save_model(clf,format("models/ebm_covonly_split%d_1to1_int.pkl" % split))
